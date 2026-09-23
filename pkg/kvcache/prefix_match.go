@@ -21,11 +21,11 @@ import (
 	"math"
 	"sync"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
@@ -37,8 +37,12 @@ import (
 // same chain.
 const SpeculativeTier = "speculative"
 
-// defaultTierWeight scores blocks held in a tier without a configured weight.
-const defaultTierWeight = 1.0
+// speculativeTierWeight scores speculative entries when the speculative tier
+// has no configured weight.
+const speculativeTierWeight = 1.0
+
+// unknownTierWeight scores blocks held in a tier without a configured weight.
+const unknownTierWeight = 0.0
 
 // matchCancellationMask paces context-cancellation checks over key
 // positions: positions where pos&mask == 0 poll ctx.Err().
@@ -48,11 +52,16 @@ const matchCancellationMask = 255
 // the contiguous chain of keys the pod holds, counted from the first key.
 type PodMatch struct {
 	// WeightedScore sums, per block of the chain, the highest device-tier
-	// weight among the pod's entries for that block; tiers without a
-	// configured weight count defaultTierWeight.
+	// weight among the pod's entries for that block. Tiers without a
+	// configured weight count unknownTierWeight; speculative entries count
+	// speculativeTierWeight unless the speculative tier is configured.
 	WeightedScore float64
 	// MatchedBlocks is the chain length in blocks, regardless of tier.
 	MatchedBlocks int
+	// ConfirmedBlocks is the chain length in blocks counting only keys the
+	// pod holds in an engine-reported device tier; the tier may change from
+	// block to block. Speculative entries end the chain.
+	ConfirmedBlocks int
 	// BlocksByTier is the per-tier chain length: a tier counts a block only
 	// while the pod holds every previous block in that same tier.
 	// Speculative entries count under SpeculativeTier. Never nil.
@@ -77,9 +86,9 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 	)
 	defer span.End()
 	span.SetAttributes(
-		attribute.Int("llm_d.kv_cache.prefix_match.key_count", len(keys)),
-		attribute.Int("llm_d.kv_cache.prefix_match.pod_filter_count", podFilter.Len()),
-		attribute.Bool("llm_d.kv_cache.prefix_match.walked", k.keyWalker != nil),
+		semconv.LLMDKVCachePrefixMatchKeyCount(len(keys)),
+		semconv.LLMDKVCachePrefixMatchPodFilterCount(podFilter.Len()),
+		semconv.LLMDKVCachePrefixMatchWalked(k.keyWalker != nil),
 	)
 
 	var matches map[string]PodMatch
@@ -100,8 +109,8 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 		metrics.LookupHits.Add(float64(blocksFound))
 	}
 	span.SetAttributes(
-		attribute.Int("llm_d.kv_cache.prefix_match.pods_matched", len(matches)),
-		attribute.Int("llm_d.kv_cache.prefix_match.longest_chain", blocksFound),
+		semconv.LLMDKVCachePrefixMatchPodsMatched(len(matches)),
+		semconv.LLMDKVCachePrefixMatchLongestChain(blocksFound),
 	)
 	return matches, nil
 }
@@ -278,6 +287,11 @@ type matchSlot struct {
 	seen   uint32
 	weight float64
 	tiers  []tierChain
+	// confirmed tracks the chain of keys held in a non-speculative tier;
+	// confirmedSeen is the key stamp of the last key holding one.
+	confirmed      int
+	confirmedSeen  uint32
+	confirmedAlive bool
 }
 
 // prefixAccumulator folds an ordered walk over request keys into per-pod
@@ -352,7 +366,14 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 		}
 		slot := &a.slots[s]
 
-		w := a.weightOf(ref.DeviceTier, ref.TierOrdinal)
+		tier, tierOrdinal := ref.DeviceTier, ref.TierOrdinal
+		if ref.Speculative || ref.DeviceTier == SpeculativeTier {
+			tier, tierOrdinal = SpeculativeTier, speculativeTierOrdinal
+		} else {
+			slot.confirmedSeen = a.keyStamp
+		}
+
+		w := a.weightOf(tier, tierOrdinal)
 		switch {
 		case slot.seen != a.keyStamp:
 			slot.seen = a.keyStamp
@@ -361,10 +382,6 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			slot.weight = w
 		}
 
-		tier, tierOrdinal := ref.DeviceTier, ref.TierOrdinal
-		if ref.Speculative || ref.DeviceTier == SpeculativeTier {
-			tier, tierOrdinal = SpeculativeTier, speculativeTierOrdinal
-		}
 		if !a.stampTier(slot, tierOrdinal) && a.first {
 			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
 		}
@@ -392,6 +409,9 @@ func (a *prefixAccumulator) endKey() bool {
 		for i := range a.slots {
 			s := &a.slots[i]
 			s.matched, s.score = 1, s.weight
+			if s.confirmedSeen == a.keyStamp {
+				s.confirmed, s.confirmedAlive = 1, true
+			}
 			for t := range s.tiers {
 				s.tiers[t].count = 1
 			}
@@ -408,6 +428,13 @@ func (a *prefixAccumulator) endKey() bool {
 		}
 		s.matched++
 		s.score += s.weight
+		switch {
+		case !s.confirmedAlive:
+		case s.confirmedSeen == a.keyStamp:
+			s.confirmed++
+		default:
+			s.confirmedAlive = false
+		}
 		for t := range s.tiers {
 			tc := &s.tiers[t]
 			switch {
@@ -433,7 +460,7 @@ func (a *prefixAccumulator) result() map[string]PodMatch {
 		for _, tc := range s.tiers {
 			byTier[tc.name] = tc.count
 		}
-		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, BlocksByTier: byTier}
+		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, ConfirmedBlocks: s.confirmed, BlocksByTier: byTier}
 	}
 	return out
 }
@@ -460,7 +487,10 @@ func (a *prefixAccumulator) weightOf(tier string, ordinal uint32) float64 {
 			return a.weightCache[i].weight
 		}
 	}
-	w := defaultTierWeight
+	w := unknownTierWeight
+	if tier == SpeculativeTier {
+		w = speculativeTierWeight
+	}
 	if configured, ok := a.weights[tier]; ok {
 		w = configured
 	}

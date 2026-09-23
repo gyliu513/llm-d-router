@@ -53,10 +53,10 @@ metrics, not EPP metrics. The raw engine metrics remain available at the model s
 
 ### P/D sidecar: MoRI-IO metrics
 
-The P/D sidecar currently exposes only the `moriio_dns_*` MoRI-IO metrics through an HTTP `/metrics`
-endpoint. It exposes them only when `--metrics-port` or the backward-compatible
-`MORIIO_METRICS_ADDR` environment variable is set. The P/D sidecar metrics server does not configure
-TLS. `SecureServing` applies to the sidecar data-plane listener.
+The P/D sidecar currently exposes only the `moriio_dns_*` MoRI-IO metrics, and only when
+`--metrics-port` or the backward-compatible `MORIIO_METRICS_ADDR` environment variable is set. The
+endpoint serves plain HTTP unless `--metrics-cert-dir` is set; see
+[MoRI-IO DNS re-resolution](#mori-io-dns-re-resolution) for the enablement and TLS settings.
 
 This endpoint belongs to the sidecar process;
 its controller-runtime registry is separate from the router pod's EPP registry.
@@ -277,6 +277,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Bytes currently held in the queue. |
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
 | `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector` | Candidate endpoints with missing or stale metrics. |
+| `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
 | `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
 | `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
 | `llm_d_epp_flow_control_global_capacity_utilization_requests` | Gauge | `inference_pool` | Global request capacity use. |
@@ -547,6 +548,12 @@ expose these counters at `/metrics` on that port; `0` (the default) disables it.
 The `MORIIO_METRICS_ADDR` env var (e.g. `:9090`) is a backward-compatible
 fallback, consulted only when `--metrics-port` is unset.
 
+The endpoint serves plain HTTP by default. Pass `--metrics-cert-dir` with a
+directory containing `tls.crt` and `tls.key` to serve it over TLS instead.
+Missing or invalid files stop the sidecar; the metrics listener does not fall
+back to HTTP. The metrics TLS setting is independent of `--secure-proxy` and
+`--cert-path`, which apply to the sidecar data-plane listener.
+
 | Full metric name | Type | Labels | Notes |
 |---|---|---|---|
 | `moriio_dns_reresolve_total` | Counter | - | Successful request-path re-resolutions of a peer DNS name (counted per actual lookup; concurrent lookups coalesced by singleflight count once). |
@@ -555,32 +562,30 @@ fallback, consulted only when `--metrics-port` is unset.
 
 ## Deprecated series
 
-Selected legacy series remain available as aliases alongside current `llm_d_epp_*` series. Prefer
-the current names in new dashboards and alerts. The aliases do not cover every current metric.
+The legacy series listed here have been deprecated. Prefer the current `llm_d_epp_*` names in new
+dashboards and alerts. Series marked "no longer emitted" are removed; the table records their
+replacements so dashboards and alerts can be updated.
 
 | Legacy series | Current replacement | Notes |
 |---|---|---|
-| `llm_d_inference_scheduler_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Dual emission. |
-| `llm_d_inference_scheduler_datalayer_poll_errors_total`, `llm_d_inference_scheduler_datalayer_extract_errors_total` | `llm_d_epp_datalayer_poll_errors_total`, `llm_d_epp_datalayer_extract_errors_total` | Dual emission. |
-| `inference_objective_*` request, latency, predicted-latency, and SLO series | Corresponding `llm_d_epp_*` series | Dual emission. Some predicted-latency labels differ between legacy and current series. |
-| `inference_pool_average_*`, `inference_pool_ready_pods` | Corresponding `llm_d_epp_*` series | Dual emission. Current standard-deviation series have no legacy twin. |
-| `inference_pool_per_pod_queue_size` | `llm_d_epp_per_endpoint_queue_size` | Dual emission with different metric names and labels. |
-| `inference_extension_scheduler_e2e_duration_seconds` | `llm_d_epp_scheduler_e2e_duration_seconds` | Dual emission. |
-| `inference_extension_scheduler_attempts_total` | `llm_d_epp_scheduler_attempts_total` | Dual emission. |
-| `inference_extension_plugin_duration_seconds` | `llm_d_epp_plugin_duration_seconds` | Dual emission. |
-| `inference_extension_info` | `llm_d_epp_info` | Dual emission. |
-| `inference_extension_model_rewrite_decisions_total` | `llm_d_epp_model_rewrite_decisions_total` | Dual emission. |
-| `inference_extension_flow_control_request_queue_duration_seconds` | `llm_d_epp_flow_control_request_queue_duration_seconds` | Dual emission. |
-| `inference_extension_flow_control_dispatch_cycle_duration_seconds` | `llm_d_epp_flow_control_dispatch_cycle_duration_seconds` | Dual emission. |
-| `inference_extension_flow_control_request_enqueue_duration_seconds` | `llm_d_epp_flow_control_request_enqueue_duration_seconds` | Dual emission. |
-| `inference_extension_flow_control_queue_size` | `llm_d_epp_flow_control_queue_size` | Dual emission. |
-| `inference_extension_flow_control_queue_bytes` | `llm_d_epp_flow_control_queue_bytes` | Dual emission. |
-| `inference_extension_flow_control_pool_saturation` | `llm_d_epp_flow_control_pool_saturation` | Dual emission. |
-| `inference_extension_prefix_indexer_size` | `llm_d_epp_prefix_indexer_size` | Dual emission. |
-| `inference_extension_prefix_indexer_hit_ratio` | `llm_d_epp_prefix_indexer_hit_ratio` | Dual emission. |
-| `inference_extension_prefix_indexer_hit_bytes` | `llm_d_epp_prefix_indexer_hit_bytes` | Dual emission. |
-| `kvcache_index_*` index series | `llm_d_epp_kv_cache_index_*` | Six index series are dual-emitted. |
-| `kvcache_kvevents_dedup_removed_hashes_suppressed_total`, `kvcache_kvevents_dedup_removed_hashes_forwarded_total` | Corresponding `llm_d_epp_kv_cache_events_*` series | These two KV-event series are dual-emitted. Other KV-event series are current-only. |
+| `llm_d_inference_scheduler_disagg_decision_total` | `llm_d_epp_disagg_decision_total` | Deprecated; no longer emitted. |
+| `llm_d_inference_scheduler_datalayer_poll_errors_total`, `llm_d_inference_scheduler_datalayer_extract_errors_total` | `llm_d_epp_datalayer_poll_errors_total`, `llm_d_epp_datalayer_extract_errors_total` | Deprecated; no longer emitted. |
+| `inference_extension_scheduler_e2e_duration_seconds` | `llm_d_epp_scheduler_e2e_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_scheduler_attempts_total` | `llm_d_epp_scheduler_attempts_total` | Deprecated; no longer emitted. |
+| `inference_extension_plugin_duration_seconds` | `llm_d_epp_plugin_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_info` | `llm_d_epp_info` | Deprecated; no longer emitted. |
+| `inference_extension_model_rewrite_decisions_total` | `llm_d_epp_model_rewrite_decisions_total` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_request_queue_duration_seconds` | `llm_d_epp_flow_control_request_queue_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_dispatch_cycle_duration_seconds` | `llm_d_epp_flow_control_dispatch_cycle_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_request_enqueue_duration_seconds` | `llm_d_epp_flow_control_request_enqueue_duration_seconds` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_queue_size` | `llm_d_epp_flow_control_queue_size` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_queue_bytes` | `llm_d_epp_flow_control_queue_bytes` | Deprecated; no longer emitted. |
+| `inference_extension_flow_control_pool_saturation` | `llm_d_epp_flow_control_pool_saturation` | Deprecated; no longer emitted. |
+| `inference_extension_prefix_indexer_size` | `llm_d_epp_prefix_indexer_size` | Deprecated; no longer emitted. |
+| `inference_extension_prefix_indexer_hit_ratio` | `llm_d_epp_prefix_indexer_hit_ratio` | Deprecated; no longer emitted. |
+| `inference_extension_prefix_indexer_hit_bytes` | `llm_d_epp_prefix_indexer_hit_bytes` | Deprecated; no longer emitted. |
+| `kvcache_index_admissions_total`, `kvcache_index_evictions_total`, `kvcache_index_lookup_requests_total`, `kvcache_index_lookup_hits_total`, `kvcache_index_max_pod_hit_count_total`, `kvcache_index_lookup_latency_seconds` | `llm_d_epp_kv_cache_index_*` | Deprecated; no longer emitted. |
+| `kvcache_kvevents_dedup_removed_hashes_suppressed_total`, `kvcache_kvevents_dedup_removed_hashes_forwarded_total` | `llm_d_epp_kv_cache_events_dedup_removed_hashes_suppressed_total`, `llm_d_epp_kv_cache_events_dedup_removed_hashes_forwarded_total` | Deprecated; no longer emitted. |
 
 The historical `llm_d_router_epp_*` prefix is not emitted by the current Go code.
 

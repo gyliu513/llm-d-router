@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/sidecar/metrics"
 )
 
@@ -42,7 +44,7 @@ func (s *Server) fanoutEncoderPrimer(ctx context.Context, originalRequest map[st
 }
 
 // handleECSharedStorage handles an Encoder-Prefiller-Decoder disaggregation request
-func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string) {
+func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, prefillEndPoint string, encodeEndPoints []string, apiType reqcommon.APIType) {
 	s.logger.V(logging.DEBUG).Info("running EPD protocol", "prefiller", prefillEndPoint, "encoderCount", len(encodeEndPoints))
 
 	_, body, ok := s.readJSONBody(r, w)
@@ -83,5 +85,5 @@ func (s *Server) handleECSharedStorage(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
-	s.runPDPipeline(w, r, body, prefillEndPoint, requestID)
+	s.runPDPipeline(w, r, body, prefillEndPoint, requestID, apiType)
 }
