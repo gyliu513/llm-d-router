@@ -43,17 +43,14 @@ const (
 	StageDecode  = "decode"
 )
 
-// Disaggregation type labels: which stages of the request are split across pods.
+// Disaggregation type labels: which stages of the request are split across
+// pods. Spelled like the coordinator's stage path labels so dashboards can join
+// the two components.
 const (
-	DisaggTypePD  = "p/d"
-	DisaggTypeEPD = "e/p/d"
-	DisaggTypeED  = "e/d"
+	DisaggTypePD  = "prefill-decode"
+	DisaggTypeEPD = "encode-prefill-decode"
+	DisaggTypeED  = "encode-decode"
 )
-
-// latencyBuckets covers encode, prefill, and decode wall-clock latency in
-// seconds, from a few milliseconds to several minutes (decode can stream for a
-// long time).
-var latencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
 
 var (
 	requestsTotal = prometheus.NewCounterVec(
@@ -79,7 +76,7 @@ var (
 			Subsystem: subsystem,
 			Name:      "encode_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Encode stage latency in seconds.", compbasemetrics.ALPHA),
-			Buckets:   latencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 	)
 
@@ -88,7 +85,7 @@ var (
 			Subsystem: subsystem,
 			Name:      "prefill_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Prefill stage latency in seconds.", compbasemetrics.ALPHA),
-			Buckets:   latencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 	)
 
@@ -97,7 +94,7 @@ var (
 			Subsystem: subsystem,
 			Name:      "decode_duration_seconds",
 			Help:      metricsutil.HelpMsgWithStability("Decode stage latency in seconds.", compbasemetrics.ALPHA),
-			Buckets:   latencyBuckets,
+			Buckets:   metricsutil.GeneralLatencyBuckets,
 		},
 	)
 

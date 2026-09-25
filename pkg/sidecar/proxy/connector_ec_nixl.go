@@ -125,9 +125,6 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 		encodeStart := time.Now()
 		params, contributed, total, err := s.fanoutEncoderCollect(r.Context(), body, encodeEndPoints, requestID)
 		if err != nil {
-			// fanoutEncoderCollect only errors once it has actually dispatched
-			// to an encoder, so the duration sample is meaningful here too.
-			metrics.RecordEncodeDuration(time.Since(encodeStart))
 			metrics.RecordError(metrics.StageEncode)
 			s.logger.Error(err, "encoder processing failed", "requestID", requestID)
 			if err := errorBadGateway(err, w); err != nil {
@@ -135,10 +132,9 @@ func (s *Server) handleECNIXL(w http.ResponseWriter, r *http.Request, prefillEnd
 			}
 			return
 		}
+		// total == 0 means there was no multimodal input to encode, so no
+		// encoder was invoked and the duration is not sampled.
 		if total > 0 {
-			// total == 0 means there was no multimodal input to encode, so no
-			// encoder was actually invoked; skip the sample rather than skew
-			// the histogram with a sub-microsecond no-op.
 			metrics.RecordEncodeDuration(time.Since(encodeStart))
 			// All-missing degrades silently to primer-mode; warn so the
 			// operator sees the regression.

@@ -373,6 +373,8 @@ retryLoop:
 	}
 	statusWriter := &statusCapturingResponseWriter{ResponseWriter: w}
 	decodeWriter, finalizeDecodeWriter := newCachedTokensResponseWriterWithFinalize(statusWriter, pCachedTokens, streamingEnabled)
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	dataParallelUsed := s.forwardDataParallel && s.dataParallelHandler(decodeWriter, dreq)
 	decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeDataParallel(dataParallelUsed))
 
@@ -381,6 +383,7 @@ retryLoop:
 		decodeSpan.SetAttributes(semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host))
 		s.dispatchDecode(decodeWriter, dreq, body)
 	}
+	decodeReturned = true
 	if err := finalizeDecodeWriter(); err != nil {
 		metrics.RecordDecodeDuration(time.Since(decodeStart))
 		metrics.RecordError(metrics.StageDecode)
@@ -391,7 +394,7 @@ retryLoop:
 
 	decodeDuration := time.Since(decodeStart)
 	metrics.RecordDecodeDuration(decodeDuration)
-	if statusWriter.statusCode < 200 || statusWriter.statusCode >= 300 {
+	if statusWriter.failed() {
 		metrics.RecordError(metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
@@ -628,6 +631,7 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 					panic(rec)
 				}
 				prefillSpan.SetStatus(codes.Error, "prefill handler aborted")
+				metrics.RecordError(metrics.StagePrefill)
 				cancel()
 				s.logger.Error(nil, "concurrent-dispatch prefill handler aborted",
 					"request_id", uuidStr)
@@ -636,11 +640,14 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 		pw := &bufferedResponseWriter{}
 		prefillHandler.ServeHTTP(pw, preq)
 		prefillResp = pw
+		prefillDuration := time.Since(prefillStartedAt)
+		metrics.RecordPrefillDuration(prefillDuration)
 		prefillSpan.SetAttributes(
 			semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
-			semconv.LLMDPDProxyPrefillDurationMs(float64(time.Since(prefillStartedAt).Milliseconds())),
+			semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 		)
 		if isHTTPError(pw.statusCode) {
+			metrics.RecordError(metrics.StagePrefill)
 			prefillSpan.SetStatus(codes.Error, "prefill request failed")
 			cancel() // KV will never arrive -> abort decode instead of hanging
 			s.logger.Error(nil, "concurrent-dispatch prefill returned error status",
@@ -656,8 +663,11 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Swallowing the abort here keeps the process alive but hides the failure
 	// from the client, so record it and replay it on the request goroutine.
 	var decodeAborted atomic.Bool
+	// Written by the decode goroutine, read after decodeDone is closed.
+	var decodeDuration time.Duration
 	go func() {
 		defer close(decodeDone)
+		defer func() { decodeDuration = time.Since(decodeStartedAt) }()
 		// Same recover: abort this request, do not kill the process.
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -746,6 +756,16 @@ func (s *Server) runNIXLProtocolV2WriteParallel(
 	// Wait for decode to finish (streamed on success, or promptly aborted) so
 	// we never leak the decode goroutine or its response body.
 	<-decodeDone
+
+	// Decode is attributed only when prefill succeeded. Otherwise decode was
+	// cancelled by the commit point and the failure is counted as a prefill
+	// error.
+	if !clientResponded {
+		metrics.RecordDecodeDuration(decodeDuration)
+		if decodeAborted.Load() || isHTTPError(dcw.status()) {
+			metrics.RecordError(metrics.StageDecode)
+		}
+	}
 
 	if currentSpan := trace.SpanFromContext(parentCtx); currentSpan.SpanContext().IsValid() {
 		var totalDuration time.Duration

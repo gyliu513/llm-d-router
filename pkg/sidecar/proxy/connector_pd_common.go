@@ -114,11 +114,14 @@ func (s *Server) runConcurrentPD(
 
 	decodeReq = decodeReq.WithContext(ctx)
 	decodeWriter := &statusCapturingResponseWriter{ResponseWriter: w}
+	decodeReturned := false
+	defer recordDecodeAbort(&decodeReturned, decodeStart)
 	s.decoderProxy.ServeHTTP(decodeWriter, decodeReq)
+	decodeReturned = true
 
 	decodeDuration := time.Since(decodeStart)
 	metrics.RecordDecodeDuration(decodeDuration)
-	if isHTTPError(decodeWriter.statusCode) {
+	if decodeWriter.failed() {
 		metrics.RecordError(metrics.StageDecode)
 		decodeSpan.SetStatus(codes.Error, "decode request failed")
 	}
@@ -145,5 +148,17 @@ func (s *Server) runConcurrentPD(
 			semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
 			semconv.LLMDPDProxyConcurrentPD(true),
 		)
+	}
+}
+
+// recordDecodeAbort records decode duration and a decode error when decode
+// dispatch did not return normally. The reverse proxy panics with
+// http.ErrAbortHandler when a stream breaks after headers were sent (client
+// disconnect, load balancer timeout), which skips the metrics recorded after
+// dispatch. Deferred without recover, so the panic still propagates.
+func recordDecodeAbort(returned *bool, start time.Time) {
+	if !*returned {
+		metrics.RecordDecodeDuration(time.Since(start))
+		metrics.RecordError(metrics.StageDecode)
 	}
 }

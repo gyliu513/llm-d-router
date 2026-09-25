@@ -56,12 +56,13 @@ func (w *bufferedResponseWriter) bodyBytes() []byte {
 }
 
 // statusCapturingResponseWriter passes writes straight through to the
-// underlying http.ResponseWriter while recording the final status code, so a
-// streamed response (SSE included) can still be observed for error metrics
-// without buffering its body.
+// underlying http.ResponseWriter while recording the first status code written
+// and whether any body write failed, so a streamed response (SSE included) can
+// still be observed for error metrics without buffering its body.
 type statusCapturingResponseWriter struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode  int
+	writeFailed bool
 }
 
 func (w *statusCapturingResponseWriter) WriteHeader(statusCode int) {
@@ -75,7 +76,17 @@ func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
 	if w.statusCode == 0 {
 		w.statusCode = http.StatusOK
 	}
-	return w.ResponseWriter.Write(b)
+	n, err := w.ResponseWriter.Write(b)
+	if err != nil {
+		w.writeFailed = true
+	}
+	return n, err
+}
+
+// failed reports whether the response carried an error status or could not be
+// delivered to the client.
+func (w *statusCapturingResponseWriter) failed() bool {
+	return isHTTPError(w.statusCode) || w.writeFailed
 }
 
 // Flush relays to the underlying writer's Flusher so SSE streaming through
@@ -251,6 +262,13 @@ func (w *deferredCommitWriter) abort() {
 	}
 	w.aborted = true
 	w.buffer.Reset()
+}
+
+// status returns the status code decode produced, or 0 if it wrote nothing.
+func (w *deferredCommitWriter) status() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.statusCode
 }
 
 // responseStarted reports whether decode's status/headers have reached the
